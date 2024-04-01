@@ -6,6 +6,9 @@ use core::fmt::Debug;
 
 use pki_types::{SignatureVerificationAlgorithm, UnixTime};
 
+#[cfg(feature = "async-verify")]
+use pki_types::AsyncSignatureVerificationAlgorithm;
+
 use crate::cert::lenient_certificate_serial_number;
 use crate::crl::crl_signature_err;
 use crate::der::{self, DerIterator, FromDer, Tag, CONSTRUCTED, CONTEXT_SPECIFIC};
@@ -138,6 +141,34 @@ impl<'a> CertRevocationList<'a> {
             },
             budget,
         )
+        .map_err(crl_signature_err)
+    }
+
+
+    #[cfg(feature = "async-verify")]
+    /// Verify the CRL signature using the issuer certificate and a list of supported signature
+    /// verification algorithms, consuming signature operations from the [`Budget`].
+    pub(crate) async fn async_verify_signature(
+        &self,
+        supported_sig_algs: &[&dyn AsyncSignatureVerificationAlgorithm],
+        issuer_spki: untrusted::Input<'_>,
+        budget: &mut Budget,
+    ) -> Result<(), Error> {
+        signed_data::async_verify_signed_data(
+            supported_sig_algs,
+            issuer_spki,
+            &match self {
+                #[cfg(feature = "alloc")]
+                CertRevocationList::Owned(crl) => crl.signed_data.borrow(),
+                CertRevocationList::Borrowed(crl) => SignedData {
+                    data: crl.signed_data.data,
+                    algorithm: crl.signed_data.algorithm,
+                    signature: crl.signed_data.signature,
+                },
+            },
+            budget,
+        )
+        .await
         .map_err(crl_signature_err)
     }
 }

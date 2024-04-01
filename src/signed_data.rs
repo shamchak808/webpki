@@ -18,6 +18,9 @@ use crate::verify_cert::Budget;
 
 use pki_types::{AlgorithmIdentifier, SignatureVerificationAlgorithm};
 
+#[cfg(feature = "async-verify")]
+use pki_types::AsyncSignatureVerificationAlgorithm;
+
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
@@ -208,6 +211,61 @@ pub(crate) fn verify_signed_data(
     }
 }
 
+pub(crate) async fn async_verify_signed_data(
+    supported_algorithms: &[&dyn AsyncSignatureVerificationAlgorithm],
+    spki_value: untrusted::Input<'_>,
+    signed_data: &SignedData<'_>,
+    budget: &mut Budget,
+) -> Result<(), Error> {
+    budget.consume_signature()?;
+
+    // We need to verify the signature in `signed_data` using the public key
+    // in `public_key`. In order to know which *ring* signature verification
+    // algorithm to use, we need to know the public key algorithm (ECDSA,
+    // RSA PKCS#1, etc.), the curve (if applicable), and the digest algorithm.
+    // `signed_data` identifies only the public key algorithm and the digest
+    // algorithm, and `public_key` identifies only the public key algorithm and
+    // the curve (if any). Thus, we have to combine information from both
+    // inputs to figure out which `ring::signature::VerificationAlgorithm` to
+    // use to verify the signature.
+    //
+    // This is all further complicated by the fact that we don't have any
+    // implicit knowledge about any algorithms or identifiers, since all of
+    // that information is encoded in `supported_algorithms.` In particular, we
+    // avoid hard-coding any of that information so that (link-time) dead code
+    // elimination will work effectively in eliminating code for unused
+    // algorithms.
+
+    // Parse the signature.
+    //
+    let mut found_signature_alg_match = false;
+    for supported_alg in supported_algorithms
+        .iter()
+        .filter(|alg| alg.signature_alg_id().as_ref() == signed_data.algorithm.as_slice_less_safe())
+    {
+        match async_verify_signature(
+            *supported_alg,
+            spki_value,
+            signed_data.data,
+            signed_data.signature,
+        ).await {
+            Err(Error::UnsupportedSignatureAlgorithmForPublicKey) => {
+                found_signature_alg_match = true;
+                continue;
+            }
+            result => {
+                return result;
+            }
+        }
+    }
+
+    if found_signature_alg_match {
+        Err(Error::UnsupportedSignatureAlgorithmForPublicKey)
+    } else {
+        Err(Error::UnsupportedSignatureAlgorithm)
+    }
+}
+
 pub(crate) fn verify_signature(
     signature_alg: &dyn SignatureVerificationAlgorithm,
     spki_value: untrusted::Input,
@@ -225,6 +283,28 @@ pub(crate) fn verify_signature(
             msg.as_slice_less_safe(),
             signature.as_slice_less_safe(),
         )
+        .map_err(|_| Error::InvalidSignatureForPublicKey)
+}
+
+#[cfg(feature = "async-verify")]
+pub(crate) async fn async_verify_signature(
+    signature_alg: &dyn AsyncSignatureVerificationAlgorithm,
+    spki_value: untrusted::Input<'_>,
+    msg: untrusted::Input<'_>,
+    signature: untrusted::Input<'_>,
+) -> Result<(), Error> {
+    let spki = der::read_all::<SubjectPublicKeyInfo>(spki_value)?;
+    if signature_alg.public_key_alg_id().as_ref() != spki.algorithm_id_value.as_slice_less_safe() {
+        return Err(Error::UnsupportedSignatureAlgorithmForPublicKey);
+    }
+
+    signature_alg
+        .verify_signature(
+            spki.key_value.as_slice_less_safe(),
+            msg.as_slice_less_safe(),
+            signature.as_slice_less_safe(),
+        )
+        .await
         .map_err(|_| Error::InvalidSignatureForPublicKey)
 }
 

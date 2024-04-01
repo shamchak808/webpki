@@ -16,6 +16,13 @@ use core::ops::ControlFlow;
 
 use pki_types::{CertificateDer, SignatureVerificationAlgorithm, TrustAnchor, UnixTime};
 
+#[cfg(feature = "async-verify")]
+use {
+    pki_types::AsyncSignatureVerificationAlgorithm,
+    core::pin::Pin,
+    core::future::Future,
+};
+
 use crate::cert::Cert;
 use crate::crl::RevocationOptions;
 use crate::der::{self, FromDer};
@@ -160,6 +167,199 @@ impl<'a, 'p: 'a> ChainOptions<'a, 'p> {
                     self.supported_sig_algs,
                     budget,
                 )?;
+            }
+
+            spki_value = path.cert.spki;
+            issuer_subject = path.cert.subject;
+            issuer_key_usage = path.cert.key_usage;
+        }
+
+        Ok(())
+    }
+}
+
+
+// Use `'a` for lifetimes that we don't care about, `'p` for lifetimes that become a part of
+// the `VerifiedPath`.
+#[cfg(feature = "async-verify")]
+pub(crate) struct AsyncChainOptions<'a, 'p> {
+    pub(crate) eku: KeyUsage,
+    pub(crate) supported_sig_algs: &'a [&'a dyn AsyncSignatureVerificationAlgorithm],
+    pub(crate) trust_anchors: &'p [TrustAnchor<'p>],
+    pub(crate) intermediate_certs: &'p [CertificateDer<'p>],
+    pub(crate) revocation: Option<RevocationOptions<'a>>,
+}
+
+#[cfg(feature = "async-verify")]
+impl<'a, 'p: 'a> AsyncChainOptions<'a, 'p> {
+    pub(crate) async fn build_chain(
+        &self,
+        end_entity: &'p EndEntityCert<'p>,
+        time: UnixTime,
+        verify_path: Option<&dyn Fn(&VerifiedPath<'_>) -> Result<(), Error>>,
+    ) -> Result<VerifiedPath<'p>, Error> {
+        let mut path = PartialPath::new(end_entity);
+        match self.build_chain_inner(&mut path, time, verify_path, 0, &mut Budget::default()).await {
+            Ok(anchor) => Ok(VerifiedPath::new(end_entity, anchor, path)),
+            Err(ControlFlow::Break(err)) | Err(ControlFlow::Continue(err)) => Err(err),
+        }
+    }
+
+    fn build_chain_inner<'fut, 's, 'pp, 'vp, 'b>(
+        &'s self,
+        path: &'pp mut PartialPath<'p>,
+        time: UnixTime,
+        verify_path: Option<&'vp dyn Fn(&VerifiedPath<'_>) -> Result<(), Error>>,
+        sub_ca_count: usize,
+        budget: &'b mut Budget,
+    ) -> Pin<alloc::boxed::Box<dyn Future<Output = Result<&'p TrustAnchor<'p>, ControlFlow<Error, Error>>> + 'fut>> 
+    where
+        'a: 'fut,
+        'p: 'fut,
+        's: 'fut,
+        'pp: 'fut,
+        'vp: 'fut,
+        'b: 'fut,
+    {
+        alloc::boxed::Box::pin(async move {
+            let role = path.node().role();
+
+            check_issuer_independent_properties(path.head(), time, role, sub_ca_count, self.eku.inner)?;
+    
+            // TODO: HPKP checks.
+
+            let mut loop_output: Result<_, ControlFlow<Error, Error>> = Err(ControlFlow::Continue(Error::UnknownIssuer));
+            let mut err = Error::UnknownIssuer;
+            for trust_anchor in self.trust_anchors {
+                let trust_anchor_subject = untrusted::Input::from(trust_anchor.subject.as_ref());
+                if !public_values_eq(path.head().issuer, trust_anchor_subject) {
+                    loop_output = Err(Error::UnknownIssuer.into());
+                    break;
+                }
+
+                // TODO: check_distrust(trust_anchor_subject, trust_anchor_spki)?;
+
+                let node = path.node();
+                self.check_signed_chain(&node, trust_anchor, budget).await?;
+                check_signed_chain_name_constraints(&node, trust_anchor, budget)?;
+
+                let verify = match verify_path {
+                    Some(verify) => verify,
+                    None => {
+                        loop_output = Ok(trust_anchor);
+                        break;
+                    }
+                };
+
+                let candidate = VerifiedPath {
+                    end_entity: path.end_entity,
+                    intermediates: Intermediates::Borrowed(&path.intermediates[..path.used]),
+                    anchor: trust_anchor,
+                };
+
+                let result = match verify(&candidate) {
+                    Ok(()) => Ok(trust_anchor),
+                    Err(err) => Err(ControlFlow::Continue(err)),
+                };
+
+                match result {
+                    Ok(anchor) => {
+                        loop_output = Ok(anchor);
+                        break;
+                    }
+                    // Fatal errors should halt further looping.
+                    res @ Err(ControlFlow::Break(_)) => {
+                        loop_output = res;
+                        break;
+                    },
+                    // Non-fatal errors should be ranked by specificity and only returned
+                    // once all other path-building options have been exhausted.
+                    Err(ControlFlow::Continue(new_error)) => err = err.most_specific(new_error),
+                }
+            }
+    
+            let mut err = match loop_output {
+                Ok(anchor) => return Ok(anchor),
+                // Fatal errors should halt further path building.
+                res @ Err(ControlFlow::Break(_)) => return res,
+                // Non-fatal errors should be carried forward as the default_error for subsequent
+                // loop_while_non_fatal_error processing and only returned once all other path-building
+                // options have been exhausted.
+                Err(ControlFlow::Continue(err)) => err,
+            };
+    
+            // instead of calling `async_loop_while_non_fatal_error`, loop through it ourselves.
+            // This is specifically because the handling of an async future creates difficulties with the
+            // borrow checker. Looping manually is simpler than making a async closure workaround.
+            for cert_der in self.intermediate_certs {
+                let output = {
+                    let potential_issuer = Cert::from_der(untrusted::Input::from(cert_der))?;
+                    if !public_values_eq(potential_issuer.subject, path.head().issuer) {
+                        return Err(Error::UnknownIssuer.into());
+                    }
+    
+                    // Prevent loops; see RFC 4158 section 5.2.
+                    if path.node().iter().any(|prev| {
+                        public_values_eq(potential_issuer.spki, prev.cert.spki)
+                            && public_values_eq(potential_issuer.subject, prev.cert.subject)
+                    }) {
+                        return Err(Error::UnknownIssuer.into());
+                    }
+    
+                    let next_sub_ca_count = match role {
+                        Role::EndEntity => sub_ca_count,
+                        Role::Issuer => sub_ca_count + 1,
+                    };
+    
+                    budget.consume_build_chain_call()?;
+                    path.push(potential_issuer)?;
+                    let result = self.build_chain_inner(path, time, verify_path, next_sub_ca_count, budget).await;
+                    if result.is_err() {
+                        path.pop();
+                    }
+    
+                    result
+                };
+    
+                match output {
+                    Ok(anchor) => return Ok(anchor),
+                    // Fatal errors should halt further looping.
+                    res @ Err(ControlFlow::Break(_)) => return res,
+                    // Non-fatal errors should be ranked by specificity and only returned
+                    // once all other path-building options have been exhausted.
+                    Err(ControlFlow::Continue(new_error)) => err = err.most_specific(new_error),
+                }
+            }
+            Err(err.into())
+        })
+    }
+
+    async fn check_signed_chain(
+        &self,
+        path: &PathNode<'_>,
+        trust_anchor: &TrustAnchor<'_>,
+        budget: &mut Budget,
+    ) -> Result<(), ControlFlow<Error, Error>> {
+        let mut spki_value = untrusted::Input::from(trust_anchor.subject_public_key_info.as_ref());
+        let mut issuer_subject = untrusted::Input::from(trust_anchor.subject.as_ref());
+        let mut issuer_key_usage = None; // TODO(XXX): Consider whether to track TrustAnchor KU.
+        for path in path.iter() {
+            signed_data::async_verify_signed_data(
+                self.supported_sig_algs,
+                spki_value,
+                &path.cert.signed_data,
+                budget,
+            ).await?;
+
+            if let Some(revocation_opts) = &self.revocation {
+                revocation_opts.async_check(
+                    &path,
+                    issuer_subject,
+                    spki_value,
+                    issuer_key_usage,
+                    self.supported_sig_algs,
+                    budget,
+                ).await?;
             }
 
             spki_value = path.cert.spki;
@@ -571,6 +771,7 @@ where
     }
     Err(error.into())
 }
+
 
 /// A path for consideration in path building.
 ///

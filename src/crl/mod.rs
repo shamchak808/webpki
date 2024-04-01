@@ -14,6 +14,9 @@
 
 use pki_types::SignatureVerificationAlgorithm;
 
+#[cfg(feature = "async-verify")]
+use pki_types::AsyncSignatureVerificationAlgorithm;
+
 use crate::error::Error;
 use crate::verify_cert::{Budget, PathNode, Role};
 use crate::{der, public_values_eq};
@@ -133,6 +136,58 @@ impl<'a> RevocationOptions<'a> {
         //            of per-lookup.
         //            https://github.com/rustls/webpki/issues/81
         crl.verify_signature(supported_sig_algs, issuer_spki, budget)
+            .map_err(crl_signature_err)?;
+
+        // Verify that if the issuer has a KeyUsage bitstring it asserts cRLSign.
+        KeyUsageMode::CrlSign.check(issuer_ku)?;
+
+        // Try to find the cert serial in the verified CRL contents.
+        let cert_serial = path.cert.serial.as_slice_less_safe();
+        match crl.find_serial(cert_serial)? {
+            None => Ok(Some(CertNotRevoked::assertion())),
+            Some(_) => Err(Error::CertRevoked),
+        }
+    }
+
+    #[cfg(feature = "async-verify")]
+    pub(crate) async fn async_check(
+        &self,
+        path: &PathNode<'_>,
+        issuer_subject: untrusted::Input<'_>,
+        issuer_spki: untrusted::Input<'_>,
+        issuer_ku: Option<untrusted::Input<'_>>,
+        supported_sig_algs: &[&dyn AsyncSignatureVerificationAlgorithm],
+        budget: &mut Budget,
+    ) -> Result<Option<CertNotRevoked>, Error> {
+        assert!(public_values_eq(path.cert.issuer, issuer_subject));
+
+        // If the policy only specifies checking EndEntity revocation state and we're looking at an
+        // issuer certificate, return early without considering the certificate's revocation state.
+        if let (RevocationCheckDepth::EndEntity, Role::Issuer) = (self.depth, path.role()) {
+            return Ok(None);
+        }
+
+        let crl = self
+            .crls
+            .iter()
+            .find(|candidate_crl| candidate_crl.authoritative(path));
+
+        use UnknownStatusPolicy::*;
+        let crl = match (crl, self.status_policy) {
+            (Some(crl), _) => crl,
+            // If the policy allows unknown, return Ok(None) to indicate that the certificate
+            // was not confirmed as CertNotRevoked, but that this isn't an error condition.
+            (None, Allow) => return Ok(None),
+            // Otherwise, this is an error condition based on the provided policy.
+            (None, _) => return Err(Error::UnknownRevocationStatus),
+        };
+
+        // Verify the CRL signature with the issuer SPKI.
+        // TODO(XXX): consider whether we can refactor so this happens once up-front, instead
+        //            of per-lookup.
+        //            https://github.com/rustls/webpki/issues/81
+        crl.async_verify_signature(supported_sig_algs, issuer_spki, budget)
+            .await
             .map_err(crl_signature_err)?;
 
         // Verify that if the issuer has a KeyUsage bitstring it asserts cRLSign.

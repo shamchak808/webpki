@@ -18,6 +18,9 @@ use pki_types::{
     CertificateDer, ServerName, SignatureVerificationAlgorithm, TrustAnchor, UnixTime,
 };
 
+#[cfg(feature = "async-verify")]
+use pki_types::AsyncSignatureVerificationAlgorithm;
+
 use crate::crl::RevocationOptions;
 use crate::error::Error;
 use crate::subject_name::{verify_dns_names, verify_ip_address_names, NameIterator};
@@ -118,6 +121,28 @@ impl<'a> EndEntityCert<'a> {
         .build_chain(self, time, verify_path)
     }
 
+    /// `verify_for_usage` but with `AsyncSignatureVerificationAlgorithm`
+    #[cfg(feature = "async-verify")]
+    pub async fn async_verify_for_usage<'p>(
+        &'p self,
+        supported_sig_algs: &[&dyn pki_types::AsyncSignatureVerificationAlgorithm],
+        trust_anchors: &'p [TrustAnchor<'_>],
+        intermediate_certs: &'p [CertificateDer<'p>],
+        time: UnixTime,
+        usage: KeyUsage,
+        revocation: Option<RevocationOptions<'_>>,
+        verify_path: Option<&dyn Fn(&VerifiedPath<'_>) -> Result<(), Error>>,
+    ) -> Result<VerifiedPath<'p>, Error> {
+        verify_cert::AsyncChainOptions {
+            eku: usage,
+            supported_sig_algs,
+            trust_anchors,
+            intermediate_certs,
+            revocation,
+        }
+        .build_chain(self, time, verify_path).await
+    }
+
     /// Verifies that the certificate is valid for the given Subject Name.
     pub fn verify_is_valid_for_subject_name(
         &self,
@@ -170,6 +195,22 @@ impl<'a> EndEntityCert<'a> {
             untrusted::Input::from(msg),
             untrusted::Input::from(signature),
         )
+    }
+
+    /// async version of `verify_signature`
+    #[cfg(feature = "async-verify")]
+    pub async fn async_verify_signature(
+        &self,
+        signature_alg: &dyn AsyncSignatureVerificationAlgorithm,
+        msg: &[u8],
+        signature: &[u8],
+    ) -> Result<(), Error> {
+        signed_data::async_verify_signature(
+            signature_alg,
+            self.inner.spki,
+            untrusted::Input::from(msg),
+            untrusted::Input::from(signature),
+        ).await
     }
 }
 
