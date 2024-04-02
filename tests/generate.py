@@ -296,6 +296,17 @@ fn %(test_name)s() {
         check_cert(ee, ca, &[%(valid_names_str)s], &[%(invalid_names_str)s]),
         %(expected)s
     );
+}
+
+#[cfg(feature = "async-verify")]
+#[tokio::test]
+fn async_%(test_name)s() {
+    let ee = include_bytes!("%(ee_cert_path)s");
+    let ca = include_bytes!("%(ca_cert_path)s");
+    assert_eq!(
+        async_check_cert(ee, ca, &[%(valid_names_str)s], &[%(invalid_names_str)s]).await,
+        %(expected)s
+    );
 }"""
         % locals(),
         file=output,
@@ -679,6 +690,18 @@ fn %(lower_test_name)s() {
     let signature = include_bytes!("%(sig_path)s");
     assert_eq!(
         check_sig(ee, %(algorithm)s, message, signature),
+        %(expected)s
+    );
+}
+
+#[cfg(feature = "async-verify")]
+#[tokio::test]
+async fn async_%(lower_test_name)s() {
+    let ee = include_bytes!("%(cert_path)s");
+    let message = include_bytes!("%(message_path)s");
+    let signature = include_bytes!("%(sig_path)s");
+    assert_eq!(
+        check_sig(ee, %(algorithm)s, message, signature).await,
         %(expected)s
     );
 }"""

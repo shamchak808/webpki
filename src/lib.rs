@@ -171,6 +171,63 @@ pub static ALL_VERIFICATION_ALGS: &[&dyn types::SignatureVerificationAlgorithm] 
     aws_lc_rs::RSA_PSS_2048_8192_SHA512_LEGACY_KEY,
 ];
 
+/// An array of all the verification algorithms exported by this crate.
+///
+/// This will be empty if the crate is built without the `ring` and `aws_lc_rs` features.
+#[cfg(feature = "async-verify")]
+pub static ALL_ASYNC_VERIFICATION_ALGS: &[&dyn types::AsyncSignatureVerificationAlgorithm] = &[
+    #[cfg(feature = "ring")]
+    &types::AsyncWrapperImpl{ algorithm: ring::ECDSA_P256_SHA256 },
+    #[cfg(feature = "ring")]
+    &types::AsyncWrapperImpl{ algorithm: ring::ECDSA_P256_SHA384 },
+    #[cfg(feature = "ring")]
+    &types::AsyncWrapperImpl{ algorithm: ring::ECDSA_P384_SHA256 },
+    #[cfg(feature = "ring")]
+    &types::AsyncWrapperImpl{ algorithm: ring::ECDSA_P384_SHA384 },
+    #[cfg(feature = "ring")]
+    &types::AsyncWrapperImpl{ algorithm: ring::ED25519 },
+    #[cfg(all(feature = "ring", feature = "alloc"))]
+    &types::AsyncWrapperImpl{ algorithm: ring::RSA_PKCS1_2048_8192_SHA256 },
+    #[cfg(all(feature = "ring", feature = "alloc"))]
+    &types::AsyncWrapperImpl{ algorithm: ring::RSA_PKCS1_2048_8192_SHA384 },
+    #[cfg(all(feature = "ring", feature = "alloc"))]
+    &types::AsyncWrapperImpl{ algorithm: ring::RSA_PKCS1_2048_8192_SHA512 },
+    #[cfg(all(feature = "ring", feature = "alloc"))]
+    &types::AsyncWrapperImpl{ algorithm: ring::RSA_PKCS1_3072_8192_SHA384 },
+    #[cfg(all(feature = "ring", feature = "alloc"))]
+    &types::AsyncWrapperImpl{ algorithm: ring::RSA_PSS_2048_8192_SHA256_LEGACY_KEY },
+    #[cfg(all(feature = "ring", feature = "alloc"))]
+    &types::AsyncWrapperImpl{ algorithm: ring::RSA_PSS_2048_8192_SHA384_LEGACY_KEY },
+    #[cfg(all(feature = "ring", feature = "alloc"))]
+    &types::AsyncWrapperImpl{ algorithm: ring::RSA_PSS_2048_8192_SHA512_LEGACY_KEY },
+    #[cfg(feature = "aws_lc_rs")]
+    &types::AsyncWrapperImpl{ algorithm: aws_lc_rs::ECDSA_P256_SHA256 },
+    #[cfg(feature = "aws_lc_rs")]
+    &types::AsyncWrapperImpl{ algorithm: aws_lc_rs::ECDSA_P256_SHA384 },
+    #[cfg(feature = "aws_lc_rs")]
+    &types::AsyncWrapperImpl{ algorithm: aws_lc_rs::ECDSA_P384_SHA256 },
+    #[cfg(feature = "aws_lc_rs")]
+    &types::AsyncWrapperImpl{ algorithm: aws_lc_rs::ECDSA_P384_SHA384 },
+    #[cfg(feature = "aws_lc_rs")]
+    &types::AsyncWrapperImpl{ algorithm: aws_lc_rs::ECDSA_P521_SHA512 },
+    #[cfg(feature = "aws_lc_rs")]
+    &types::AsyncWrapperImpl{ algorithm: aws_lc_rs::ED25519 },
+    #[cfg(feature = "aws_lc_rs")]
+    &types::AsyncWrapperImpl{ algorithm: aws_lc_rs::RSA_PKCS1_2048_8192_SHA256 },
+    #[cfg(feature = "aws_lc_rs")]
+    &types::AsyncWrapperImpl{ algorithm: aws_lc_rs::RSA_PKCS1_2048_8192_SHA384 },
+    #[cfg(feature = "aws_lc_rs")]
+    &types::AsyncWrapperImpl{ algorithm: aws_lc_rs::RSA_PKCS1_2048_8192_SHA512 },
+    #[cfg(feature = "aws_lc_rs")]
+    &types::AsyncWrapperImpl{ algorithm: aws_lc_rs::RSA_PKCS1_3072_8192_SHA384 },
+    #[cfg(feature = "aws_lc_rs")]
+    &types::AsyncWrapperImpl{ algorithm: aws_lc_rs::RSA_PSS_2048_8192_SHA256_LEGACY_KEY },
+    #[cfg(feature = "aws_lc_rs")]
+    &types::AsyncWrapperImpl{ algorithm: aws_lc_rs::RSA_PSS_2048_8192_SHA384_LEGACY_KEY },
+    #[cfg(feature = "aws_lc_rs")]
+    &types::AsyncWrapperImpl{ algorithm: aws_lc_rs::RSA_PSS_2048_8192_SHA512_LEGACY_KEY },
+];
+
 fn public_values_eq(a: untrusted::Input<'_>, b: untrusted::Input<'_>) -> bool {
     a.as_slice_less_safe() == b.as_slice_less_safe()
 }
